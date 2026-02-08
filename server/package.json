@@ -16,6 +16,6 @@
     "helmet": "^7.1.0",
     "multer": "^2.0.2",
     "nanoid": "^5.0.7",
-    "pdf-parse": "^2.4.5"
+    "pdf-parse": "^1.1.1"
   }
 }

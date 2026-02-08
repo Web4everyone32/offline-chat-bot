@@ -47,7 +47,6 @@ function chunkText(text, chunkSize = 1200, overlap = 200) {
 }
 
 function scoreOverlap(chunk, query) {
-  // very fast: keyword overlap score
   const c = normalize(chunk);
   const q = normalize(query);
   if (!c || !q) return 0;
@@ -69,7 +68,6 @@ function pickBestChunks(pdfText, query, k = 4) {
     .sort((a, b) => b.s - a.s)
     .slice(0, k);
 
-  // if nothing matches, still provide beginning context
   const best = scored.filter((x) => x.s > 0).map((x) => x.ch);
   if (best.length) return best;
 
@@ -84,10 +82,7 @@ async function ollamaChat({ system, messages }) {
     body: JSON.stringify({
       model: OLLAMA_MODEL,
       stream: false,
-      messages: [
-        { role: "system", content: system },
-        ...messages
-      ]
+      messages: [{ role: "system", content: system }, ...messages]
     })
   });
 
@@ -109,11 +104,19 @@ app.post("/session", (req, res) => {
 
 app.post("/upload", upload.single("file"), async (req, res) => {
   try {
-    const { conversationId } = req.body;
-    const conv = conversations.get(conversationId);
-    if (!conv) return res.status(400).json({ error: "Invalid conversationId" });
+    // ✅ allow conversationId from body OR query (fix for frontend mismatch)
+    const conversationId = req.body?.conversationId || req.query?.conversationId;
 
-    if (!req.file?.path) return res.status(400).json({ error: "No file uploaded" });
+    const conv = conversations.get(conversationId);
+    if (!conv) {
+      return res.status(400).json({
+        error: "Invalid conversationId (session missing on frontend)."
+      });
+    }
+
+    if (!req.file?.path) {
+      return res.status(400).json({ error: "No file uploaded." });
+    }
 
     const buffer = fs.readFileSync(req.file.path);
     const parsed = await pdfParse(buffer);
@@ -122,10 +125,16 @@ app.post("/upload", upload.single("file"), async (req, res) => {
     conv.pdfText = text;
 
     fs.unlinkSync(req.file.path);
-    res.json({ success: true, chars: text.length });
+
+    res.json({
+      success: true,
+      chars: text.length
+    });
   } catch (err) {
     console.error("PDF upload error:", err);
-    res.status(500).json({ error: "PDF processing failed" });
+    res.status(500).json({
+      error: "PDF processing failed. Check backend console."
+    });
   }
 });
 
@@ -135,10 +144,8 @@ app.post("/chat", async (req, res) => {
     const conv = conversations.get(conversationId);
     if (!conv) return res.status(400).json({ reply: "Conversation not found." });
 
-    // Detect target language
     const targetLang = language && language !== "auto" ? language : "same as user";
 
-    // Build PDF context
     let contextBlock = "";
     if (conv.pdfText) {
       const best = pickBestChunks(conv.pdfText, message, 4);
@@ -150,7 +157,6 @@ app.post("/chat", async (req, res) => {
         "No PDF is uploaded. Answer normally. If user asks about a PDF, ask them to attach it.";
     }
 
-    // Hackathon-safe system prompt (clear + explainable)
     const system = `
 You are "Niglen", an offline assistant running locally for a hackathon demo.
 Rules:
@@ -161,22 +167,17 @@ Rules:
 - Reply language: ${targetLang}.
 `;
 
-    // Maintain short history
     const history = conv.history || [];
-    const trimmedHistory = history.slice(-8); // last 8 turns
+    const trimmedHistory = history.slice(-8);
 
     const userMsg = conv.pdfText
       ? `User question: ${message}\n\nPDF Context:\n${contextBlock}`
       : message;
 
-    const messages = [
-      ...trimmedHistory,
-      { role: "user", content: userMsg }
-    ];
+    const messages = [...trimmedHistory, { role: "user", content: userMsg }];
 
     const reply = await ollamaChat({ system, messages });
 
-    // Save history (without huge pdf context)
     conv.history = [
       ...trimmedHistory,
       { role: "user", content: message },

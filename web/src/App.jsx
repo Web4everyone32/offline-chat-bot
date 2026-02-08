@@ -75,7 +75,7 @@ export default function App() {
       messages: [
         {
           role: "assistant",
-          content: "Hi! Upload a PDF (optional) and ask me anything."
+          content: "Hi! How can I help you today?"
         }
       ]
     };
@@ -244,22 +244,56 @@ export default function App() {
           </button>
         </div>
 
-        <div className="chatList">
-          {conversations.map((c) => (
-            <button
-              key={c.id}
-              className={`chatItem ${c.id === activeId ? "active" : ""}`}
-              onClick={() => {
-                setActiveId(c.id);
-                setInput("");
-                setPendingFile(null);
-              }}
-              title={c.title}
-            >
-              <div className="chatItemTitle">{c.title}</div>
-            </button>
-          ))}
-        </div>
+       <div className="chatList">
+  {conversations.map((c) => (
+    <div
+      key={c.id}
+      className={`chatItem ${c.id === activeId ? "active" : ""}`}
+    >
+      <button
+        className="chatSelect"
+        onClick={() => {
+          setActiveId(c.id);
+          setInput("");
+          setPendingFile(null);
+        }}
+        title={c.title}
+      >
+        <div className="chatItemTitle">{c.title}</div>
+      </button>
+
+      {/* Rename + Delete actions */}
+      <div className="chatActions">
+        <button
+          onClick={() => {
+            const name = prompt("Rename conversation:", c.title);
+            if (!name) return;
+            setConversations(prev =>
+              prev.map(x => (x.id === c.id ? { ...x, title: name } : x))
+            );
+          }}
+          title="Rename"
+        >
+          ✏️
+        </button>
+
+        <button
+          onClick={() => {
+            if (!window.confirm("Delete this conversation?")) return;
+            setConversations(prev => prev.filter(x => x.id !== c.id));
+            if (activeId === c.id && conversations.length > 1) {
+              setActiveId(conversations.find(x => x.id !== c.id)?.id || null);
+            }
+          }}
+          title="Delete"
+        >
+          🗑️
+        </button>
+      </div>
+    </div>
+  ))}
+</div>
+
 
         <div className="sidebarFooter">
           <div className="hint">

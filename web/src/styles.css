@@ -359,3 +359,28 @@ body {
     display: none;
   }
 }
+
+.chatItem {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.chatSelect {
+  background: none;
+  border: none;
+  text-align: left;
+  width: 100%;
+  cursor: pointer;
+}
+
+.chatActions {
+  display: flex;
+  gap: 6px;
+}
+
+.chatActions button {
+  background: none;
+  border: none;
+  cursor: pointer;
+}

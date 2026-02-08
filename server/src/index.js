@@ -1,3 +1,15 @@
+function isUnsafe(text = "") {
+  const banned = [
+    "kill", "suicide", "bomb", "terror",
+    "porn", "rape", "nude", "sex",
+    "hate", "racist", "violence"
+  ];
+
+  const t = text.toLowerCase();
+  return banned.some(word => t.includes(word));
+}
+
+
 import express from "express";
 import cors from "cors";
 import multer from "multer";
@@ -6,196 +18,238 @@ import crypto from "crypto";
 import { createRequire } from "module";
 
 const require = createRequire(import.meta.url);
-const pdfParse = require("pdf-parse"); // ✅ CommonJS safe in Node v22
+const pdfParse = require("pdf-parse");
 
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: "2mb" }));
+app.use(express.json({ limit: "4mb" }));
 
 const upload = multer({ dest: "uploads/" });
 
-/**
- * In-memory store (hackathon-friendly)
- * conversations.set(id, { pdfText, history })
- */
+/*
+Conversation structure:
+{
+  docs: [
+    {
+      id,
+      name,
+      chunks: [{ text, emb, norm }]
+    }
+  ],
+  history: []
+}
+*/
 const conversations = new Map();
 
-const OLLAMA_URL = process.env.OLLAMA_URL || "http://localhost:11434";
-const OLLAMA_MODEL = process.env.OLLAMA_MODEL || "llama3";
+const OLLAMA_URL = "http://localhost:11434";
+const CHAT_MODEL = "llama3";
+const EMBED_MODEL = "nomic-embed-text";
 
-// ---------- helpers: chunking + simple retrieval ----------
-function normalize(s) {
-  return (s || "")
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}\s]/gu, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function chunkText(text, chunkSize = 1200, overlap = 200) {
-  const t = (text || "").replace(/\s+/g, " ").trim();
-  if (!t) return [];
+function chunkText(text, size = 1000, overlap = 200) {
+  const clean = text.replace(/\s+/g, " ").trim();
   const chunks = [];
   let i = 0;
-  while (i < t.length) {
-    const end = Math.min(i + chunkSize, t.length);
-    chunks.push(t.slice(i, end));
-    if (end === t.length) break;
-    i = Math.max(0, end - overlap);
+
+  while (i < clean.length) {
+    const end = Math.min(i + size, clean.length);
+    chunks.push(clean.slice(i, end));
+    if (end === clean.length) break;
+    i = end - overlap;
   }
+
   return chunks;
 }
 
-function scoreOverlap(chunk, query) {
-  const c = normalize(chunk);
-  const q = normalize(query);
-  if (!c || !q) return 0;
-
-  const qWords = q.split(" ").filter((w) => w.length >= 3);
-  if (!qWords.length) return 0;
-
-  let score = 0;
-  for (const w of qWords) {
-    if (c.includes(w)) score += 1;
-  }
-  return score / qWords.length;
+function norm(v) {
+  let s = 0;
+  for (const x of v) s += x * x;
+  return Math.sqrt(s) || 1e-9;
 }
 
-function pickBestChunks(pdfText, query, k = 4) {
-  const chunks = chunkText(pdfText);
-  const scored = chunks
-    .map((ch) => ({ ch, s: scoreOverlap(ch, query) }))
-    .sort((a, b) => b.s - a.s)
-    .slice(0, k);
-
-  const best = scored.filter((x) => x.s > 0).map((x) => x.ch);
-  if (best.length) return best;
-
-  return chunks.slice(0, Math.min(k, chunks.length));
+function cosine(a, an, b, bn) {
+  let d = 0;
+  for (let i = 0; i < a.length; i++) d += a[i] * b[i];
+  return d / (an * bn);
 }
 
-// ---------- Ollama call ----------
-async function ollamaChat({ system, messages }) {
+async function embed(text) {
+  const r = await fetch(`${OLLAMA_URL}/api/embeddings`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model: EMBED_MODEL, prompt: text })
+  });
+
+  const j = await r.json();
+  const v = new Float32Array(j.embedding);
+  return { v, n: norm(v) };
+}
+
+async function chat(system, messages) {
   const r = await fetch(`${OLLAMA_URL}/api/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      model: OLLAMA_MODEL,
+      model: CHAT_MODEL,
       stream: false,
       messages: [{ role: "system", content: system }, ...messages]
     })
   });
 
-  if (!r.ok) {
-    const t = await r.text().catch(() => "");
-    throw new Error(`Ollama error ${r.status}: ${t}`);
-  }
-
-  const data = await r.json();
-  return data?.message?.content || "";
+  const j = await r.json();
+  return j?.message?.content || "";
 }
 
-// ---------- routes ----------
-app.post("/session", (req, res) => {
+/* ---------- ROUTES ---------- */
+
+app.post("/session", (_, res) => {
   const id = crypto.randomUUID();
-  conversations.set(id, { pdfText: "", history: [] });
+  conversations.set(id, { docs: [], history: [] });
   res.json({ conversationId: id });
 });
 
+/* ---------- MULTI-PDF UPLOAD + EMBEDDING ---------- */
 app.post("/upload", upload.single("file"), async (req, res) => {
   try {
-    // ✅ allow conversationId from body OR query (fix for frontend mismatch)
-    const conversationId = req.body?.conversationId || req.query?.conversationId;
-
+    const { conversationId } = req.body;
     const conv = conversations.get(conversationId);
-    if (!conv) {
-      return res.status(400).json({
-        error: "Invalid conversationId (session missing on frontend)."
-      });
-    }
-
-    if (!req.file?.path) {
-      return res.status(400).json({ error: "No file uploaded." });
-    }
+    if (!conv) return res.status(400).json({ error: "Invalid conversation" });
 
     const buffer = fs.readFileSync(req.file.path);
     const parsed = await pdfParse(buffer);
-    const text = (parsed?.text || "").trim();
-
-    conv.pdfText = text;
-
     fs.unlinkSync(req.file.path);
 
-    res.json({
-      success: true,
-      chars: text.length
+    const chunks = chunkText(parsed.text);
+
+    const embedded = [];
+    for (const c of chunks) {
+      const { v, n } = await embed(c);
+      embedded.push({ text: c, emb: v, norm: n });
+    }
+
+    conv.docs.push({
+      id: crypto.randomUUID(),
+      name: req.file.originalname,
+      chunks: embedded
     });
-  } catch (err) {
-    console.error("PDF upload error:", err);
-    res.status(500).json({
-      error: "PDF processing failed. Check backend console."
-    });
+
+    res.json({ success: true, chunks: embedded.length });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "PDF processing failed" });
   }
 });
 
+/* ---------- TRUE RAG CHAT ---------- */
 app.post("/chat", async (req, res) => {
   try {
     const { conversationId, message, language } = req.body;
+/* ---------- GREETING SHORT-CIRCUIT ---------- */
+const greeting = message?.trim().toLowerCase();
+
+if (["hi", "hello", "hey", "hi niglen", "hello niglen"].includes(greeting)) {
+  return res.json({
+    reply: "Hi! What would you like to talk about or ask? I'm here to help!"
+  });
+}
+
     const conv = conversations.get(conversationId);
-    if (!conv) return res.status(400).json({ reply: "Conversation not found." });
+    if (!conv) return res.json({ reply: "Conversation not found." });
 
-    const targetLang = language && language !== "auto" ? language : "same as user";
+    /* ---------- 1. Detect language automatically ---------- */
+    const detectPrompt = `
+Identify the language of the following text.
+Respond with ONLY the language name in English.
 
-    let contextBlock = "";
-    if (conv.pdfText) {
-      const best = pickBestChunks(conv.pdfText, message, 4);
-      contextBlock =
-        "You have access to an uploaded PDF. Use ONLY this PDF context when answering PDF questions.\n\n" +
-        best.map((c, i) => `--- PDF CHUNK ${i + 1} ---\n${c}`).join("\n\n");
-    } else {
-      contextBlock =
-        "No PDF is uploaded. Answer normally. If user asks about a PDF, ask them to attach it.";
-    }
-
-    const system = `
-You are "Niglen", an offline assistant running locally for a hackathon demo.
-Rules:
-- Be helpful, accurate, and concise.
-- If you don't know, say so and ask for the missing info.
-- Do NOT generate offensive/unsafe content.
-- If PDF context is present, ground answers in it and quote small snippets when useful.
-- Reply language: ${targetLang}.
+Text:
+${message}
 `;
 
-    const history = conv.history || [];
-    const trimmedHistory = history.slice(-8);
+    const detectedLang = (await chat(
+      "You are a precise language detector.",
+      [{ role: "user", content: detectPrompt }]
+    )).trim();
 
-    const userMsg = conv.pdfText
-      ? `User question: ${message}\n\nPDF Context:\n${contextBlock}`
-      : message;
+    const targetLang =
+      language && language !== "auto" ? language : detectedLang;
 
-    const messages = [...trimmedHistory, { role: "user", content: userMsg }];
+    /* ---------- 2. Embed query ---------- */
+    const { v: qVec, n: qNorm } = await embed(message);
 
-    const reply = await ollamaChat({ system, messages });
+    /* ---------- 3. Retrieve best chunks across PDFs ---------- */
+    let matches = [];
 
-    conv.history = [
-      ...trimmedHistory,
+    for (const d of conv.docs) {
+      for (const c of d.chunks) {
+        matches.push({
+          score: cosine(qVec, qNorm, c.emb, c.norm),
+          text: c.text,
+          doc: d.name
+        });
+      }
+    }
+
+    matches.sort((a, b) => b.score - a.score);
+
+    const context = matches
+      .slice(0, 5)
+      .map(m => `[${m.doc}] ${m.text}`)
+      .join("\n\n");
+
+    /* ---------- 4. Strong multilingual system prompt ---------- */
+    const system = `
+You are Niglen, a safe and responsible multilingual AI assistant.
+
+STRICT SAFETY RULES:
+- Never generate offensive, hateful, sexual, violent, or illegal content.
+- If user asks for unsafe or inappropriate content, politely refuse.
+- Provide helpful, educational, and respectful responses only.
+- Always answer in: ${targetLang}
+- Never mix languages.
+- If PDF context exists, base answer strictly on it.
+- If context is missing, say you don't know.
+- Keep answers clear and concise.
+`;
+
+    /* ---------- 5. Generate final answer ---------- */
+    const reply = await chat(system, [
+      {
+        role: "user",
+        content: `
+User question:
+${message}
+
+PDF context:
+${context || "No PDF context available."}
+`
+      }
+    ]);
+
+    /* ---------- 6. Save conversation history ---------- */
+    conv.history.push(
       { role: "user", content: message },
       { role: "assistant", content: reply }
-    ];
+    );
 
-    res.json({ reply });
-  } catch (err) {
-    console.error("Chat error:", err);
+if (isUnsafe(reply)) {
+  return res.json({
+    reply:
+      "I’m here to provide safe and helpful information, so I can’t assist with that request."
+  });
+}
+
+    res.json({ reply, detectedLang, targetLang });
+  } catch (e) {
+    console.error(e);
     res.json({
-      reply:
-        "I couldn’t reach Ollama. Make sure Ollama is installed, running, and you pulled the model (ollama pull llama3)."
+      reply: "Multilingual engine error. Ensure Ollama is running."
     });
   }
 });
 
+/* ---------- START SERVER (ONLY ADDITION) ---------- */
+
 const PORT = 8080;
+
 app.listen(PORT, () => {
-  console.log(`🚀 Server running on http://localhost:${PORT}`);
-  console.log(`🧠 Ollama: ${OLLAMA_URL} | Model: ${OLLAMA_MODEL}`);
+  console.log(`🚀 Niglen RAG server running on http://localhost:${PORT}`);
 });

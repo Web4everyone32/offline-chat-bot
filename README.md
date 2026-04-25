@@ -100,3 +100,50 @@ App runs on → `http://localhost:5173`
 ---
 
 ## 📁 Project Structure
+niglen/
+├── server/
+│   ├── src/
+│   │   └── index.js       # Express API, RAG pipeline, SSE streaming, persistent storage
+│   ├── Modelfile          # Legal-bot domain configuration for Ollama
+│   ├── storage.json       # Persistent PDF embeddings and chat history
+│   └── package.json
+└── web/
+├── src/
+│   ├── App.jsx        # React UI with streaming + markdown
+│   └── styles.css     # Design system with dark mode
+└── package.json
+
+---
+
+## 🔌 API Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/health` | Server health check |
+| POST | `/session` | Create a new chat session |
+| GET | `/sessions` | List all sessions |
+| PATCH | `/session/:id` | Rename a session |
+| DELETE | `/session/:id` | Delete a session |
+| POST | `/upload` | Upload and index a PDF (saved permanently) |
+| GET | `/session/:id/docs` | List documents in session |
+| DELETE | `/session/:id/doc/:docId` | Remove a document |
+| POST | `/chat` | Send message (SSE stream) |
+
+---
+
+## ⚠️ Troubleshooting
+
+| Problem | Fix |
+|---------|-----|
+| "Multilingual engine error" | Run `ollama serve` in a terminal |
+| Upload fails | Ensure server is running on port 8080 |
+| `legal-bot` not found | Run `ollama create legal-bot -f Modelfile` |
+| `cp` not recognized (Windows) | Use `copy` instead of `cp` |
+| Port conflict | Edit `server/.env` and update `API` in `web/src/App.jsx` |
+| storage.json error on startup | Run `del storage.json` and restart server |
+
+---
+
+## 📄 License
+
+MIT — free to use, modify, and distribute.

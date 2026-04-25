@@ -16,11 +16,12 @@ const upload = multer({ dest: "uploads/", limits: { fileSize: 20 * 1024 * 1024 }
 
 /* ─── CONFIG ─── */
 const OLLAMA_URL = "http://localhost:11434";
-const CHAT_MODEL = "llama3";
+const CHAT_MODEL = "legal-bot";
 const EMBED_MODEL = "nomic-embed-text";
 const CHUNK_SIZE = 800;
 const CHUNK_OVERLAP = 150;
 const TOP_K = 6;
+const STORAGE_FILE = "./storage.json";
 
 /* ─── SAFETY ─── */
 const BANNED = [
@@ -33,8 +34,57 @@ function isUnsafe(text = "") {
   return BANNED.some(w => t.includes(w));
 }
 
-/* ─── IN-MEMORY STORE ─── */
-const conversations = new Map();
+/* ─── PERSISTENT STORAGE ─── */
+
+function loadStorage() {
+  try {
+    if (fs.existsSync(STORAGE_FILE)) {
+      const raw = fs.readFileSync(STORAGE_FILE, "utf-8");
+      const data = JSON.parse(raw);
+      const map = new Map();
+      for (const [id, conv] of Object.entries(data)) {
+        conv.docs = (conv.docs || []).map(doc => ({
+          ...doc,
+          chunks: doc.chunks.map(c => ({
+            text: c.text,
+            emb: new Float32Array(c.emb),
+            norm: c.norm
+          }))
+        }));
+        map.set(id, conv);
+      }
+      console.log(`📂 Loaded ${map.size} conversations from storage.`);
+      return map;
+    }
+  } catch (e) {
+    console.error("⚠️  Could not load storage.json, starting fresh.", e.message);
+  }
+  return new Map();
+}
+
+function saveStorage() {
+  try {
+    const obj = {};
+    for (const [id, conv] of conversations.entries()) {
+      obj[id] = {
+        ...conv,
+        docs: conv.docs.map(doc => ({
+          ...doc,
+          chunks: doc.chunks.map(c => ({
+            text: c.text,
+            emb: Array.from(c.emb),
+            norm: c.norm
+          }))
+        }))
+      };
+    }
+    fs.writeFileSync(STORAGE_FILE, JSON.stringify(obj), "utf-8");
+  } catch (e) {
+    console.error("⚠️  Could not save storage.json:", e.message);
+  }
+}
+
+const conversations = loadStorage();
 
 /* ─── HELPERS ─── */
 function chunkText(text, size = CHUNK_SIZE, overlap = CHUNK_OVERLAP) {
@@ -126,7 +176,7 @@ async function chatOnce(system, messages) {
 /* ─── ROUTES ─── */
 
 app.get("/health", (_, res) => {
-  res.json({ ok: true, version: "2.0.0" });
+  res.json({ ok: true, version: "2.1.0", model: CHAT_MODEL });
 });
 
 app.post("/session", (_, res) => {
@@ -137,6 +187,7 @@ app.post("/session", (_, res) => {
     title: "New chat",
     createdAt: Date.now()
   });
+  saveStorage();
   res.json({ conversationId: id });
 });
 
@@ -153,11 +204,13 @@ app.patch("/session/:id", (req, res) => {
   const conv = conversations.get(req.params.id);
   if (!conv) return res.status(404).json({ error: "Not found" });
   if (req.body.title) conv.title = req.body.title.slice(0, 60);
+  saveStorage();
   res.json({ ok: true });
 });
 
 app.delete("/session/:id", (req, res) => {
   conversations.delete(req.params.id);
+  saveStorage();
   res.json({ ok: true });
 });
 
@@ -187,6 +240,9 @@ app.post("/upload", upload.single("file"), async (req, res) => {
       pageCount: parsed.numpages || null
     });
 
+    saveStorage();
+    console.log(`💾 Saved "${req.file.originalname}" (${embedded.length} chunks) permanently.`);
+
     res.json({ success: true, docId, chunks: embedded.length, pages: parsed.numpages });
   } catch (e) {
     console.error(e);
@@ -198,6 +254,7 @@ app.delete("/session/:id/doc/:docId", (req, res) => {
   const conv = conversations.get(req.params.id);
   if (!conv) return res.status(404).json({ error: "Not found" });
   conv.docs = conv.docs.filter(d => d.id !== req.params.docId);
+  saveStorage();
   res.json({ ok: true });
 });
 
@@ -216,7 +273,7 @@ app.post("/chat", async (req, res) => {
       res.setHeader("Content-Type", "text/event-stream");
       res.setHeader("Cache-Control", "no-cache");
       res.setHeader("Connection", "keep-alive");
-      const reply = "Hi! How can I help you today? Feel free to ask me anything or upload a PDF to chat with it.";
+      const reply = "Hi! I am your Indian Legal Assistant. Ask me about IPC sections, contracts, consumer rights, or upload a legal document for analysis.";
       res.write(`data: ${JSON.stringify({ token: reply })}\n\n`);
       res.write(`data: ${JSON.stringify({ done: true, full: reply })}\n\n`);
       res.end();
@@ -265,17 +322,19 @@ app.post("/chat", async (req, res) => {
       .join("\n\n---\n\n");
 
     const hasContext = context.length > 0;
-    const system = `You are Niglen, a helpful, precise, and multilingual AI assistant.
+    const system = `You are a specialized Indian legal assistant.
 
 LANGUAGE: Always respond in ${targetLang}. Never mix languages.
 
-FORMATTING: Use markdown. Use **bold** for key terms. Use bullet points or numbered lists for steps. Use \`code blocks\` for technical content.
+DOMAIN: You ONLY answer questions related to Indian law, legal documents, contracts, IPC sections, constitutional rights, consumer protection, and legal procedures. If the question is not legal, respond with ONLY this single sentence and nothing else: "I am a legal assistant and can only help with law-related questions." Do NOT provide any additional information, recipes, tips, or general help after that sentence. Stop immediately.
 
-SAFETY: Never produce offensive, hateful, sexual, violent, or illegal content.
+FORMATTING: Use markdown. Use **bold** for legal terms and section numbers. Use numbered lists for steps or procedures.
+
+SAFETY: Never produce offensive, hateful, or illegal content. Always advise consulting a qualified lawyer for specific legal action.
 
 ${hasContext
-  ? `KNOWLEDGE: Use ONLY the provided PDF context. Cite source document names. If answer is not in context, say so.`
-  : `KNOWLEDGE: No PDF context available. Answer from general knowledge. Be honest if you don't know.`}`;
+  ? `KNOWLEDGE: Use ONLY the provided PDF context. Always cite the source document and section. If answer is not in context, say so clearly.`
+  : `KNOWLEDGE: Answer from your legal knowledge. Always cite relevant acts, sections, or articles.`}`;
 
     const historySlice = conv.history.slice(-12);
     const userContent = hasContext
@@ -299,11 +358,12 @@ ${hasContext
 
     if (conv.history.length > 40) conv.history = conv.history.slice(-40);
 
+    saveStorage();
     res.end();
   } catch (e) {
     console.error(e);
     try {
-      res.write(`data: ${JSON.stringify({ error: "Engine error. Ensure Ollama is running with llama3 and nomic-embed-text." })}\n\n`);
+      res.write(`data: ${JSON.stringify({ error: "Engine error. Ensure Ollama is running with legal-bot and nomic-embed-text." })}\n\n`);
       res.end();
     } catch {}
   }
@@ -311,5 +371,7 @@ ${hasContext
 
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
-  console.log(`\n🚀 Niglen v2 running on http://localhost:${PORT}\n`);
+  console.log(`\n🚀 Niglen Legal v2.1 running on http://localhost:${PORT}`);
+  console.log(`   Model: ${CHAT_MODEL}`);
+  console.log(`   Storage: ${STORAGE_FILE}\n`);
 });

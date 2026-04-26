@@ -4,3 +4,9 @@ dist
 .vscode
 .DS_Store
 uploads
+
+server/global_knowledge/
+server/storage/
+server/legal_chunks/
+server/indian_law_knowledge.txt
+server/uploads/

@@ -16,6 +16,8 @@
     "helmet": "^7.1.0",
     "multer": "^2.0.2",
     "nanoid": "^5.0.7",
-    "pdf-parse": "^1.1.1"
+    "pdf-parse": "^1.1.1",
+    "stream-chain": "^3.6.1",
+    "stream-json": "^2.1.0"
   }
 }

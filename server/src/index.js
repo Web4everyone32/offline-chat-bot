@@ -15,7 +15,7 @@ app.use(express.json({ limit: "280mb" }));
 const upload = multer({ dest: "uploads/", limits: { fileSize: 280 * 1024 * 1024 } });
 
 const OLLAMA_URL = "http://localhost:11434";
-const CHAT_MODEL = "legal-bot";
+const CHAT_MODEL = "legal-bot-finetuned";
 const EMBED_MODEL = "nomic-embed-text";
 const CHUNK_SIZE = 800;
 const CHUNK_OVERLAP = 150;
@@ -551,14 +551,18 @@ ${hasContext
 });
 
 const PORT = process.env.PORT || 8080;
-// Load global docs async before starting server
-loadGlobalDocsAsync().then(docs => {
-  globalDocs = docs;
-  app.listen(PORT, () => {
-    console.log(`\n🚀 Niglen Legal v2.3 running on http://localhost:${PORT}`);
-    console.log(`   Model: ${CHAT_MODEL}`);
-    console.log(`   Global Knowledge: ${globalDocs.length} document(s) loaded`);
-    console.log(`   Max Global Chunks: ${MAX_GLOBAL_CHUNKS}`);
-    console.log(`   Storage: ${STORAGE_DIR}/\n`);
-  });
+
+
+app.listen(PORT, () => {
+  console.log(`\n🚀 Niglen Legal v2.3 running on http://localhost:${PORT}`);
+  console.log(`   Model: ${CHAT_MODEL}`);
+  console.log(`   Storage: ${STORAGE_DIR}/\n`);
 });
+
+// Load global docs in background AFTER server starts
+setTimeout(() => {
+  loadGlobalDocsAsync().then(docs => {
+    globalDocs = docs;
+    console.log(`\n🌍 Global knowledge ready — ${docs.length} documents loaded.\n`);
+  });
+}, 2000);

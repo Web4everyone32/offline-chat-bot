@@ -9,30 +9,28 @@ function renderMarkdown(text) {
   if (!text) return "";
   let html = text
     .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
-    // Code blocks
     .replace(/```[\w]*\n?([\s\S]*?)```/g, (_, code) =>
       `<pre><code>${code.trim()}</code></pre>`)
-    // Inline code
     .replace(/`([^`]+)`/g, "<code>$1</code>")
-    // Bold
     .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
-    // Italic
     .replace(/\*(.+?)\*/g, "<em>$1</em>")
-    // Headers
     .replace(/^### (.+)$/gm, "<h3>$1</h3>")
     .replace(/^## (.+)$/gm, "<h2>$1</h2>")
     .replace(/^# (.+)$/gm, "<h1>$1</h1>")
-    // Numbered lists
-    .replace(/^\d+\.\s+(.+)$/gm, "<li class='ol-item'>$1</li>")
-    // Bullet lists
     .replace(/^[-*]\s+(.+)$/gm, "<li>$1</li>")
-    // Paragraphs / line breaks
+    .replace(/^\d+\.\s+(.+)$/gm, "<li class='ol-item'>$1</li>")
     .replace(/\n\n/g, "</p><p>")
     .replace(/\n/g, "<br>");
 
-  // Wrap consecutive <li> into <ul>
+  // Auto-number ordered list items
+  let counter = 0;
+  html = html.replace(/<li class='ol-item'>/g, () => {
+    counter++;
+    return `<li value='${counter}'>`;
+  });
+
   html = html.replace(/(<li(?:[^>]*)>[\s\S]*?<\/li>\s*)+/g, m => {
-    if (m.includes("ol-item")) return `<ol>${m.replace(/ class='ol-item'/g, "")}</ol>`;
+    if (m.includes("value=")) return `<ol>${m}</ol>`;
     return `<ul>${m}</ul>`;
   });
 
